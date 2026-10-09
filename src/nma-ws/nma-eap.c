@@ -154,6 +154,14 @@ nma_eap_init (NMAWs *ws,
 		return NULL;
 	}
 
+	/* Without this, every <signal handler="nma_ws_changed_cb" object="NMAWs">
+	 * declared in the .ui files (added by commit 6ce2e98f, "Move
+	 * nma_ws_changed_cb() calls to .ui files") stays inert: the symbol and
+	 * the object are registered above, but nothing ever resolves and wires
+	 * them without this call. Confirmed missing project-wide - no caller of
+	 * gtk_builder_connect_signals() exists anywhere in this tree. */
+	gtk_builder_connect_signals (method->builder, NULL);
+
 	method->ui_widget = GTK_WIDGET (gtk_builder_get_object (method->builder, ui_widget_name));
 	if (!method->ui_widget) {
 		g_warning ("Couldn't load UI widget '%s' from UI file %s",

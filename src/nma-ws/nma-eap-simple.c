@@ -38,6 +38,23 @@ struct _NMAEapSimple {
 	guint idle_func_id;
 };
 
+/**
+ * nma_eap_simple_get_username:
+ * @method: the #NMAEapSimple object
+ *
+ * Returns: (transfer none): the current text of the username entry, or an
+ * empty string if the field isn't shown for this method.
+ */
+const char *
+nma_eap_simple_get_username (NMAEapSimple *method)
+{
+	g_return_val_if_fail (method != NULL, "");
+
+	if (!method->username_requested)
+		return "";
+	return gtk_editable_get_text (GTK_EDITABLE (method->username_entry));
+}
+
 static gboolean
 always_ask_selected (GtkEntry *passwd_entry)
 {

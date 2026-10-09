@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "nma-eap.h"
+#include "nma-eap-simple.h"
 #include "nma-ws.h"
 #include "nma-ws-private.h"
 #include "nma-cert-chooser.h"
@@ -34,10 +35,18 @@ struct _NMAEapPeap {
 	NMSetting8021xCKScheme ca_scheme;
 };
 
+static char *peap_derive_anon_identity (NMAEapPeap *method);
+
 static void
 destroy (NMAEap *parent)
 {
 	NMAEapPeap *method = (NMAEapPeap *) parent;
+
+	/* ws_8021x outlives this widget (it's shared across whatever EAP method
+	 * is currently selected) - without this, switching Authentication away
+	 * from PEAP leaves peap_update_anon_placeholder_cb connected with a
+	 * dangling method pointer, called on the next "ws-changed". */
+	g_signal_handlers_disconnect_by_data (method->ws_8021x, method);
 
 	if (method->size_group)
 		g_object_unref (method->size_group);
@@ -193,6 +202,14 @@ fill_connection (NMAEap *parent, NMConnection *connection)
 	text = gtk_editable_get_text (GTK_EDITABLE (widget));
 	if (text && *text)
 		g_object_set (s_8021x, NM_SETTING_802_1X_ANONYMOUS_IDENTITY, text, NULL);
+	else {
+		/* No explicit override: save the derived value itself rather than
+		 * leaving the property unset for nm-supplicant-config.c to derive
+		 * at connect time - keeps the saved profile explicit. */
+		gs_free char *derived = peap_derive_anon_identity (method);
+
+		g_object_set (s_8021x, NM_SETTING_802_1X_ANONYMOUS_IDENTITY, derived, NULL);
+	}
 
 	/* "Validation method" combo: 0=TOFU, 1=CA cert+domain, 2=server hash,
 	 * 3=no validation. The single source of truth for all of the below -
@@ -307,6 +324,58 @@ fill_connection (NMAEap *parent, NMConnection *connection)
 	nma_eap_fill_connection (eap, connection);
 	nma_eap_unref (eap);
 }
+
+/* Mirrors nm-supplicant-config.c's own anonymous-identity derivation
+ * (user@realm -> anonymous@realm, or "anonymous" with no realm). Returns a
+ * newly allocated string; never NULL. */
+static char *
+peap_derive_anon_identity (NMAEapPeap *method)
+{
+	NMAEap *parent = (NMAEap *) method;
+	GtkWidget *combo;
+	GtkTreeModel *model;
+	GtkTreeIter iter;
+	NMAEap *eap = NULL;
+	const char *username;
+	const char *at;
+	char *derived;
+
+	combo = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_inner_auth_combo"));
+	if (!gtk_combo_box_get_active_iter (GTK_COMBO_BOX (combo), &iter))
+		return g_strdup ("anonymous");
+	model = gtk_combo_box_get_model (GTK_COMBO_BOX (combo));
+	gtk_tree_model_get (model, &iter, I_METHOD_COLUMN, &eap, -1);
+	if (!eap)
+		return g_strdup ("anonymous");
+
+	username = nma_eap_simple_get_username ((NMAEapSimple *) eap);
+	at = (username && *username) ? strchr (username, '@') : NULL;
+	derived = g_strdup_printf ("anonymous%s", at ? at : "");
+
+	nma_eap_unref (eap);
+	return derived;
+}
+
+/* Keeps the Anonymous identity placeholder showing exactly what NM will
+ * actually send, live as the username is typed. Only ever a placeholder -
+ * an explicit anonymous identity the user types always wins; if left blank,
+ * fill_connection() saves this same derived value, not nothing. */
+static void
+peap_update_anon_placeholder_cb (NMAWs *ws, gpointer user_data)
+{
+	NMAEapPeap *method = (NMAEapPeap *) user_data;
+	NMAEap *parent = (NMAEap *) method;
+	GtkWidget *anon_widget;
+	gs_free char *placeholder = peap_derive_anon_identity (method);
+
+	/* "ws-changed" fires on every keystroke in any field, not just this
+	 * username one - skip the set (and the redraw/flicker it causes) unless
+	 * the placeholder text actually changed. */
+	anon_widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_anon_identity_entry"));
+	if (g_strcmp0 (gtk_entry_get_placeholder_text (GTK_ENTRY (anon_widget)), placeholder) != 0)
+		gtk_entry_set_placeholder_text (GTK_ENTRY (anon_widget), placeholder);
+}
+
 static void
 inner_auth_combo_changed_cb (GtkWidget *combo, gpointer user_data)
 {
@@ -339,6 +408,7 @@ inner_auth_combo_changed_cb (GtkWidget *combo, gpointer user_data)
 
 	nma_eap_unref (eap);
 
+	peap_update_anon_placeholder_cb (NULL, method);
 	nma_ws_changed_cb (combo, method->ws_8021x);
 }
 
@@ -644,9 +714,10 @@ nma_eap_peap_new (NMAWs8021x *ws_8021x,
 	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_anon_identity_entry"));
 	if (s_8021x && nm_setting_802_1x_get_anonymous_identity (s_8021x))
 		gtk_editable_set_text (GTK_EDITABLE (widget), nm_setting_802_1x_get_anonymous_identity (s_8021x));
-	/* Left blank, NM derives "anonymous@<realm>" from Identity at connect time
-	 * (nm-supplicant-config.c) - hint that here instead of forcing a value. */
-	gtk_entry_set_placeholder_text (GTK_ENTRY (widget), _("anonymous (auto-derived if left blank)"));
+	/* Placeholder is kept live by peap_update_anon_placeholder_cb(), already
+	 * set once above via inner_auth_combo_changed_cb() and kept in sync with
+	 * the username field from here via the "ws-changed" connection below. */
+	g_signal_connect (ws_8021x, "ws-changed", G_CALLBACK (peap_update_anon_placeholder_cb), method);
 
 	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_domain_entry"));
 	if (s_8021x && nm_setting_802_1x_get_domain_suffix_match (s_8021x))

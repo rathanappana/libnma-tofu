@@ -53,4 +53,6 @@ NMAEapSimple *nma_eap_simple_new (NMAWs8021x *ws_8021x,
                                   NMAEapSimpleFlags flags,
                                   const char *const*hints);
 
+const char *nma_eap_simple_get_username (NMAEapSimple *method);
+
 #endif /* NMA_EAP_SIMPLE_H */
