@@ -28,6 +28,10 @@ struct _NMAEapPeap {
 	gboolean is_editor;
 	GtkWidget *ca_cert_chooser;
 	GtkWidget *eap_widget;
+	/* The connection's actual ca-cert scheme at load time - used under TOFU
+	 * to pick which field (chooser vs. hash) displays what's already pinned,
+	 * independent of the "validation method" combo's own 0/1 selection. */
+	NMSetting8021xCKScheme ca_scheme;
 };
 
 static void
@@ -39,6 +43,37 @@ destroy (NMAEap *parent)
 		g_object_unref (method->size_group);
 }
 
+/* Accepts a hash pasted with common copy-paste formatting (colons, spaces,
+ * mixed case, e.g. "AA:BB:CC:..." as shown by openssl/wpa_supplicant) and
+ * strips it down to bare hex. Returns a newly allocated 64-char lowercase
+ * hex string, or NULL if what remains isn't a valid SHA-256 fingerprint. */
+static char *
+clean_sha256_hex (const char *text)
+{
+	GString *out;
+	int      i;
+
+	if (!text)
+		return NULL;
+
+	out = g_string_sized_new (64);
+	for (i = 0; text[i]; i++) {
+		if (text[i] == ':' || g_ascii_isspace (text[i]))
+			continue;
+		if (!g_ascii_isxdigit (text[i])) {
+			g_string_free (out, TRUE);
+			return NULL;
+		}
+		g_string_append_c (out, g_ascii_tolower (text[i]));
+	}
+
+	if (out->len != 64) {
+		g_string_free (out, TRUE);
+		return NULL;
+	}
+	return g_string_free (out, FALSE);
+}
+
 static gboolean
 validate (NMAEap *parent, GError **error)
 {
@@ -48,9 +83,26 @@ validate (NMAEap *parent, GError **error)
 	GtkTreeIter iter;
 	NMAEap *eap = NULL;
 	gboolean valid = FALSE;
+	int active;
 
-	if (   gtk_widget_get_sensitive (method->ca_cert_chooser)
-	    && !nma_cert_chooser_validate (NMA_CERT_CHOOSER (method->ca_cert_chooser), error))
+	/* "Validation method" combo: 0=TOFU, 1=CA cert+domain, 2=server hash,
+	 * 3=no validation. Only the selected one (1 or 2) is checked here -
+	 * TOFU and no validation need nothing from the user. */
+	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_verify_combo"));
+	active = gtk_combo_box_get_active (GTK_COMBO_BOX (widget));
+
+	if (active == 2) {
+		GtkWidget *hash_widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_hash_entry"));
+		gs_free char *cleaned = clean_sha256_hex (gtk_editable_get_text (GTK_EDITABLE (hash_widget)));
+
+		if (!cleaned) {
+			widget_set_error (hash_widget);
+			g_set_error_literal (error, NMA_ERROR, NMA_ERROR_GENERIC,
+			                     _("certificate hash must be 64 hex characters (SHA-256)"));
+			return FALSE;
+		}
+	} else if (active == 1
+	           && !nma_cert_chooser_validate (NMA_CERT_CHOOSER (method->ca_cert_chooser), error))
 		return FALSE;
 
 	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_inner_auth_combo"));
@@ -79,6 +131,10 @@ add_to_size_group (NMAEap *parent, GtkSizeGroup *group)
 	method->size_group = g_object_ref (group);
 
 	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_anon_identity_label"));
+	g_assert (widget);
+	gtk_size_group_add_widget (group, widget);
+
+	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_verify_method_label"));
 	g_assert (widget);
 	gtk_size_group_add_widget (group, widget);
 
@@ -124,6 +180,8 @@ fill_connection (NMAEap *parent, NMConnection *connection)
 	gboolean ca_cert_error = FALSE;
 	NMSetting8021xCKScheme scheme = NM_SETTING_802_1X_CK_SCHEME_UNKNOWN;
 	NMSettingSecretFlags secret_flags;
+	GtkWidget *combo_widget;
+	int active;
 
 	s_8021x = nm_connection_get_setting_802_1x (connection);
 	g_assert (s_8021x);
@@ -136,37 +194,95 @@ fill_connection (NMAEap *parent, NMConnection *connection)
 	if (text && *text)
 		g_object_set (s_8021x, NM_SETTING_802_1X_ANONYMOUS_IDENTITY, text, NULL);
 
+	/* "Validation method" combo: 0=TOFU, 1=CA cert+domain, 2=server hash,
+	 * 3=no validation. The single source of truth for all of the below -
+	 * see peap_ca_cert_mode_changed_cb(). */
+	combo_widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_verify_combo"));
+	active = gtk_combo_box_get_active (GTK_COMBO_BOX (combo_widget));
+
+	g_object_set (s_8021x, NM_SETTING_802_1X_CA_VERIFY_MODE,
+	              active == 0 ? NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU
+	                          : NM_SETTING_802_1X_CA_VERIFY_MODE_DEFAULT,
+	              NULL);
+
+	/* While TOFU owns the pin, the CA-chooser/domain/hash fields only display
+	 * what TOFU already put in the connection (read-only, see
+	 * peap_ca_cert_mode_changed_cb) - skip writing them so Save never
+	 * clobbers TOFU's own ca-cert/domain-match with a copy of itself. */
 	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_domain_entry"));
 	g_assert (widget);
-	text = gtk_editable_get_text (GTK_EDITABLE (widget));
-	if (text && *text)
-		g_object_set (s_8021x, NM_SETTING_802_1X_DOMAIN_SUFFIX_MATCH, text, NULL);
-
-	/* Save CA certificate PIN and its flags to the connection */
-	secret_flags = nma_cert_chooser_get_cert_password_flags (NMA_CERT_CHOOSER (method->ca_cert_chooser));
-	nm_setting_set_secret_flags (NM_SETTING (s_8021x), NM_SETTING_802_1X_CA_CERT_PASSWORD,
-	                             secret_flags, NULL);
-	if (method->is_editor) {
-		/* Update secret flags and popup when editing the connection */
-		nma_cert_chooser_update_cert_password_storage (NMA_CERT_CHOOSER (method->ca_cert_chooser),
-		                                               secret_flags, NM_SETTING (s_8021x),
-		                                               NM_SETTING_802_1X_CA_CERT_PASSWORD);
-		g_object_set (s_8021x, NM_SETTING_802_1X_CA_CERT_PASSWORD,
-		              nma_cert_chooser_get_cert_password (NMA_CERT_CHOOSER (method->ca_cert_chooser)),
-		              NULL);
+	if (active != 0) {
+		/* Only meaningful in CA+domain mode (1); a leftover value typed
+		 * there earlier must not be saved once a different mode is picked. */
+		text = (active == 1) ? gtk_editable_get_text (GTK_EDITABLE (widget)) : NULL;
+		g_object_set (s_8021x, NM_SETTING_802_1X_DOMAIN_SUFFIX_MATCH, (text && *text) ? text : NULL, NULL);
 	}
 
-	/* TLS CA certificate */
-	if (gtk_widget_get_sensitive (method->ca_cert_chooser))
+	switch (active) {
+	case 2:
+		/* Manual server-hash pin: writes ca-cert=hash://server/sha256/<hex>
+		 * directly via the same scheme TOFU uses for its own leaf-only pin
+		 * (nm-supplicant-config.c handles it unconditionally, no
+		 * ca-verify-mode involved), so wpa_supplicant enforces it with zero
+		 * daemon changes. */
+		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_hash_entry"));
+		text = gtk_editable_get_text (GTK_EDITABLE (widget));
+		{
+			gs_free char *hex = clean_sha256_hex (text);
+			gs_free char *hash_uri = hex ? g_strdup_printf ("hash://server/sha256/%s", hex) : NULL;
+
+			/* validate() already blocks Save on an invalid hash; hex==NULL
+			 * here only via update_secrets()/other callers that skip it. */
+			if (hash_uri
+			    && !nm_setting_802_1x_set_ca_cert (s_8021x, hash_uri, NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH, NULL, &error)) {
+				g_warning ("Couldn't set CA certificate hash: %s", error ? error->message : "(unknown)");
+				g_clear_error (&error);
+			}
+			/* Clears a stale "no validation" ignore-flag an earlier edit of
+			 * this same (possibly cached) connection object may have set -
+			 * nma_eap_ca_cert_ignore_set() only checks filename != NULL, the
+			 * hash string works fine for that. */
+			if (hash_uri)
+				nma_eap_ca_cert_ignore_set (parent, connection, hash_uri, FALSE);
+		}
+		break;
+	case 3:
+		/* No validation: explicitly drop any previously-set CA certificate
+		 * and mark it as intentionally not required. */
+		nm_setting_802_1x_set_ca_cert (s_8021x, NULL, NM_SETTING_802_1X_CK_SCHEME_UNKNOWN, NULL, NULL);
+		nma_eap_ca_cert_ignore_set (parent, connection, NULL, FALSE);
+		break;
+	case 0:
+		/* TOFU owns the cert; don't touch it. Just clear any leftover
+		 * "no validation" flag from an earlier edit of this connection. */
+		nma_eap_ca_cert_ignore_set (parent, connection, "tofu", FALSE);
+		break;
+	default: /* 1: CA certificate chooser */
+		/* Save CA certificate PIN and its flags to the connection */
+		secret_flags = nma_cert_chooser_get_cert_password_flags (NMA_CERT_CHOOSER (method->ca_cert_chooser));
+		nm_setting_set_secret_flags (NM_SETTING (s_8021x), NM_SETTING_802_1X_CA_CERT_PASSWORD,
+		                             secret_flags, NULL);
+		if (method->is_editor) {
+			/* Update secret flags and popup when editing the connection */
+			nma_cert_chooser_update_cert_password_storage (NMA_CERT_CHOOSER (method->ca_cert_chooser),
+			                                               secret_flags, NM_SETTING (s_8021x),
+			                                               NM_SETTING_802_1X_CA_CERT_PASSWORD);
+			g_object_set (s_8021x, NM_SETTING_802_1X_CA_CERT_PASSWORD,
+			              nma_cert_chooser_get_cert_password (NMA_CERT_CHOOSER (method->ca_cert_chooser)),
+			              NULL);
+		}
+
 		value = nma_cert_chooser_get_cert (NMA_CERT_CHOOSER (method->ca_cert_chooser), &scheme);
-	format = NM_SETTING_802_1X_CK_FORMAT_UNKNOWN;
-	if (!nm_setting_802_1x_set_ca_cert (s_8021x, value, scheme, &format, &error)) {
-		g_warning ("Couldn't read CA certificate '%s': %s", value, error ? error->message : "(unknown)");
-		g_clear_error (&error);
-		ca_cert_error = TRUE;
+		format = NM_SETTING_802_1X_CK_FORMAT_UNKNOWN;
+		if (!nm_setting_802_1x_set_ca_cert (s_8021x, value, scheme, &format, &error)) {
+			g_warning ("Couldn't read CA certificate '%s': %s", value, error ? error->message : "(unknown)");
+			g_clear_error (&error);
+			ca_cert_error = TRUE;
+		}
+		nma_eap_ca_cert_ignore_set (parent, connection, value, ca_cert_error);
+		g_free (value);
+		break;
 	}
-	nma_eap_ca_cert_ignore_set (parent, connection, value, ca_cert_error);
-	g_free (value);
 
 	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_version_combo"));
 	peapver_active = gtk_combo_box_get_active (GTK_COMBO_BOX (widget));
@@ -328,6 +444,52 @@ update_secrets (NMAEap *parent, NMConnection *connection)
 	                                      I_METHOD_COLUMN);
 }
 
+/* The "validation method" combo is the single source of truth: 0=TOFU,
+ * 1=CA cert + domain, 2=server hash, 3=no validation (insecure). Previously two
+ * separate checkboxes plus this combo had to be kept in sync by hand -
+ * that drift between independently-set widgets was the root cause of nearly
+ * every bug here. One index, nothing else to get out of sync.
+ *
+ * Visible and sensitive are driven by the exact same booleans below - never
+ * computed separately. */
+static void
+peap_ca_cert_mode_changed_cb (GtkWidget *combo, gpointer user_data)
+{
+	NMAEapPeap *method = (NMAEapPeap *) user_data;
+	GtkBuilder *builder = NMA_EAP (method)->builder;
+	GtkWidget  *hash_entry    = GTK_WIDGET (gtk_builder_get_object (builder, "eap_peap_server_hash_entry"));
+	GtkWidget  *domain_entry  = GTK_WIDGET (gtk_builder_get_object (builder, "eap_peap_domain_entry"));
+	GtkWidget  *warning_label = GTK_WIDGET (gtk_builder_get_object (builder, "eap_peap_no_verify_warning_label"));
+	int         active = gtk_combo_box_get_active (GTK_COMBO_BOX (combo));
+	gboolean    is_tofu = active == 0;
+	gboolean    editable = active == 1 || active == 2;
+	/* Under TOFU, show whichever field matches what TOFU actually pinned
+	 * (read-only) - that's its own scheme, not the combo's 1/2 choice,
+	 * which the user never gets to make in TOFU mode. Nothing pinned yet
+	 * (ca_scheme UNKNOWN, e.g. a brand-new connection) means neither
+	 * field has anything to show, so both stay hidden. */
+	gboolean    show_ca_group = active == 1
+	                          || (is_tofu && (method->ca_scheme == NM_SETTING_802_1X_CK_SCHEME_BLOB
+	                                         || method->ca_scheme == NM_SETTING_802_1X_CK_SCHEME_PATH));
+	gboolean    show_hash     = active == 2
+	                          || (is_tofu && method->ca_scheme == NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH);
+
+	gtk_widget_set_visible   (method->ca_cert_chooser, show_ca_group);
+	gtk_widget_set_sensitive (method->ca_cert_chooser, show_ca_group && editable);
+
+	gtk_widget_set_visible   (hash_entry, show_hash);
+	gtk_widget_set_sensitive (hash_entry, show_hash && editable);
+
+	/* domain-suffix-match only means anything alongside a CA certificate -
+	 * same visibility/sensitivity as the chooser. */
+	gtk_widget_set_visible   (domain_entry, show_ca_group);
+	gtk_widget_set_sensitive (domain_entry, show_ca_group && editable);
+
+	gtk_widget_set_visible (warning_label, active == 3);
+
+	nma_ws_changed_cb (combo, method->ws_8021x);
+}
+
 NMAEapPeap *
 nma_eap_peap_new (NMAWs8021x *ws_8021x,
                   NMConnection *connection,
@@ -368,7 +530,7 @@ nma_eap_peap_new (NMAWs8021x *ws_8021x,
 	method->ca_cert_chooser = nma_cert_chooser_new ("CA",
 	                                                  NMA_CERT_CHOOSER_FLAG_CERT
 	                                                | (secrets_only ? NMA_CERT_CHOOSER_FLAG_PASSWORDS : 0));
-	gtk_grid_attach (GTK_GRID (widget), method->ca_cert_chooser, 0, 2, 2, 1);
+	gtk_grid_attach (GTK_GRID (widget), method->ca_cert_chooser, 0, 3, 2, 1);
 	gtk_widget_show (method->ca_cert_chooser);
 
 	g_signal_connect (method->ca_cert_chooser,
@@ -404,12 +566,61 @@ nma_eap_peap_new (NMAWs8021x *ws_8021x,
 	if (secrets_only)
 		ca_not_required = TRUE;
 
-	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_ca_cert_not_required_checkbox"));
-	g_assert (widget);
-	g_object_bind_property (widget, "active",
-	                        method->ca_cert_chooser, "sensitive",
-	                        G_BINDING_SYNC_CREATE | G_BINDING_INVERT_BOOLEAN);
-	gtk_check_button_set_active (GTK_CHECK_BUTTON (widget), ca_not_required);
+	/* ca-verify-mode/domain-match are TOFU fork additions to libnm, newer than
+	 * this project's NM_VERSION_MIN_REQUIRED floor; nothing to deprecate here. */
+	G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+
+	{
+		GtkWidget *method_combo = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_verify_combo"));
+		GtkWidget *hash_entry   = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_hash_entry"));
+		gboolean   tofu_active;
+		gboolean   no_verify_active;
+		int        active;
+
+		g_assert (method_combo);
+		g_assert (hash_entry);
+
+		method->ca_scheme = s_8021x ? nm_setting_802_1x_get_ca_cert_scheme (s_8021x) : NM_SETTING_802_1X_CK_SCHEME_UNKNOWN;
+		tofu_active = s_8021x
+		            && nm_setting_802_1x_get_ca_verify_mode (s_8021x) == NM_SETTING_802_1X_CA_VERIFY_MODE_TOFU;
+		no_verify_active = ca_not_required && !tofu_active;
+
+		/* Combo starting index follows the connection's actual state - TOFU
+		 * and "no validation" take priority since they override whatever
+		 * ca-cert scheme happens to be stored. A profile with nothing
+		 * configured at all (no cert, no hash - UNKNOWN scheme, which is
+		 * also what a brand-new s_8021x reads as) also defaults to TOFU;
+		 * an existing CA-cert blob/path connection still shows as such. */
+		if (tofu_active)
+			active = 0;
+		else if (no_verify_active)
+			active = 3;
+		else if (method->ca_scheme == NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH)
+			active = 2;
+		else if (method->ca_scheme == NM_SETTING_802_1X_CK_SCHEME_UNKNOWN)
+			active = 0;
+		else
+			active = 1;
+		gtk_combo_box_set_active (GTK_COMBO_BOX (method_combo), active);
+
+		/* Pre-fill the hash field whenever the connection is actually
+		 * pinned by hash, TOFU-pinned or user-entered alike. */
+		if (method->ca_scheme == NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH) {
+			const char *uri = nm_setting_802_1x_get_ca_cert_uri (s_8021x);
+			const char *prefix = "hash://server/sha256/";
+
+			if (uri && g_str_has_prefix (uri, prefix))
+				gtk_editable_set_text (GTK_EDITABLE (hash_entry), uri + strlen (prefix));
+		}
+
+		g_signal_connect (method_combo, "changed", G_CALLBACK (peap_ca_cert_mode_changed_cb), method);
+
+		/* Apply the visibility/sensitivity rules derived above now that the
+		 * combo holds its initial state (no signal has fired yet). */
+		peap_ca_cert_mode_changed_cb (method_combo, method);
+	}
+
+	G_GNUC_END_IGNORE_DEPRECATIONS
 
 	widget = inner_auth_combo_init (method, connection, s_8021x, secrets_only);
 	inner_auth_combo_changed_cb (widget, (gpointer) method);
@@ -433,6 +644,9 @@ nma_eap_peap_new (NMAWs8021x *ws_8021x,
 	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_anon_identity_entry"));
 	if (s_8021x && nm_setting_802_1x_get_anonymous_identity (s_8021x))
 		gtk_editable_set_text (GTK_EDITABLE (widget), nm_setting_802_1x_get_anonymous_identity (s_8021x));
+	/* Left blank, NM derives "anonymous@<realm>" from Identity at connect time
+	 * (nm-supplicant-config.c) - hint that here instead of forcing a value. */
+	gtk_entry_set_placeholder_text (GTK_ENTRY (widget), _("anonymous (auto-derived if left blank)"));
 
 	widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_domain_entry"));
 	if (s_8021x && nm_setting_802_1x_get_domain_suffix_match (s_8021x))
@@ -443,7 +657,13 @@ nma_eap_peap_new (NMAWs8021x *ws_8021x,
 		gtk_widget_hide (widget);
 		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_domain_entry"));
 		gtk_widget_hide (widget);
-		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_ca_cert_not_required_checkbox"));
+		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_no_verify_warning_label"));
+		gtk_widget_hide (widget);
+		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_verify_method_label"));
+		gtk_widget_hide (widget);
+		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_verify_combo"));
+		gtk_widget_hide (widget);
+		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_server_hash_entry"));
 		gtk_widget_hide (widget);
 		widget = GTK_WIDGET (gtk_builder_get_object (parent->builder, "eap_peap_inner_auth_combo"));
 		gtk_widget_hide (widget);

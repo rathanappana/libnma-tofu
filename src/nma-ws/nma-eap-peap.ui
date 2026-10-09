@@ -63,19 +63,105 @@
       </packing>
     </child>
     <child>
-      <object class="GtkCheckButton" id="eap_peap_ca_cert_not_required_checkbox">
-        <property name="label" translatable="yes">No CA certificate is _required</property>
+      <object class="GtkLabel" id="eap_peap_server_verify_method_label">
         <property name="visible">True</property>
-        <property name="can_focus">True</property>
-        <property name="receives_default">False</property>
-        <property name="hexpand">True</property>
+        <property name="can_focus">False</property>
+        <property name="label" translatable="yes">Validation _method</property>
         <property name="use_underline">True</property>
-        <property name="draw_indicator">True</property>
-        <signal name="toggled" handler="nma_ws_changed_cb" object="NMAWs" swapped="no"/>
+        <property name="mnemonic_widget">eap_peap_server_verify_combo</property>
+        <property name="xalign">1</property>
+      </object>
+      <packing>
+        <property name="left_attach">0</property>
+        <property name="top_attach">1</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkComboBoxText" id="eap_peap_server_verify_combo">
+        <property name="visible">True</property>
+        <property name="can_focus">False</property>
+        <property name="hexpand">True</property>
+        <items>
+          <item translatable="yes">TOFU (Trust on First Use)</item>
+          <item translatable="yes">CA certificate + domain match</item>
+          <item translatable="yes">Server certificate hash</item>
+          <item translatable="yes">No server validation</item>
+        </items>
+        <signal name="changed" handler="nma_ws_changed_cb" object="NMAWs" swapped="no"/>
       </object>
       <packing>
         <property name="left_attach">1</property>
-        <property name="top_attach">3</property>
+        <property name="top_attach">1</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkLabel" id="eap_peap_domain_label">
+        <property name="visible" bind-source="eap_peap_domain_entry" bind-property="visible" bind-flags="sync-create"/>
+        <property name="can_focus">False</property>
+        <property name="tooltip_text" translatable="yes">Suffix of the server certificate name.</property>
+        <property name="label" translatable="yes">_Domain</property>
+        <property name="use_underline">True</property>
+        <property name="mnemonic_widget">eap_peap_domain_entry</property>
+        <property name="xalign">1</property>
+      </object>
+      <packing>
+        <property name="left_attach">0</property>
+        <property name="top_attach">2</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkEntry" id="eap_peap_domain_entry">
+        <property name="visible">True</property>
+        <property name="can_focus">True</property>
+        <property name="hexpand">True</property>
+        <property name="activates_default">True</property>
+        <signal name="changed" handler="nma_ws_changed_cb" object="NMAWs" swapped="no"/>
+      </object>
+      <packing>
+        <property name="left_attach">1</property>
+        <property name="top_attach">2</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkLabel" id="eap_peap_server_hash_label">
+        <property name="visible" bind-source="eap_peap_server_hash_entry" bind-property="visible" bind-flags="sync-create"/>
+        <property name="can_focus">False</property>
+        <property name="tooltip_text" translatable="yes">64 hex characters; colons and spaces are accepted. Use the fingerprint from your network administrator. Update it when the server certificate changes.</property>
+        <property name="label" translatable="yes">Certificate _hash</property>
+        <property name="use_underline">True</property>
+        <property name="mnemonic_widget">eap_peap_server_hash_entry</property>
+        <property name="xalign">1</property>
+      </object>
+      <packing>
+        <property name="left_attach">0</property>
+        <property name="top_attach">4</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkEntry" id="eap_peap_server_hash_entry">
+        <property name="visible">False</property>
+        <property name="can_focus">True</property>
+        <property name="hexpand">True</property>
+        <property name="activates_default">True</property>
+        <property name="tooltip_text" translatable="yes">64 hex characters; colons and spaces are accepted. Use the fingerprint from your network administrator. Update it when the server certificate changes.</property>
+        <signal name="changed" handler="nma_ws_changed_cb" object="NMAWs" swapped="no"/>
+      </object>
+      <packing>
+        <property name="left_attach">1</property>
+        <property name="top_attach">4</property>
+      </packing>
+    </child>
+    <child>
+      <object class="GtkLabel" id="eap_peap_no_verify_warning_label">
+        <property name="visible">False</property>
+        <property name="can_focus">False</property>
+        <property name="use_markup">True</property>
+        <property name="label" translatable="yes">&lt;small&gt;&lt;span foreground="red"&gt;Insecure configuration&lt;/span&gt;&lt;/small&gt;</property>
+        <property name="xalign">0</property>
+      </object>
+      <packing>
+        <property name="left_attach">1</property>
+        <property name="top_attach">5</property>
       </packing>
     </child>
     <child>
@@ -89,7 +175,7 @@
       </object>
       <packing>
         <property name="left_attach">0</property>
-        <property name="top_attach">4</property>
+        <property name="top_attach">6</property>
       </packing>
     </child>
     <child>
@@ -108,7 +194,7 @@
       </object>
       <packing>
         <property name="left_attach">1</property>
-        <property name="top_attach">4</property>
+        <property name="top_attach">6</property>
       </packing>
     </child>
     <child>
@@ -122,7 +208,7 @@
       </object>
       <packing>
         <property name="left_attach">0</property>
-        <property name="top_attach">5</property>
+        <property name="top_attach">7</property>
       </packing>
     </child>
     <child>
@@ -140,7 +226,7 @@
       </object>
       <packing>
         <property name="left_attach">1</property>
-        <property name="top_attach">5</property>
+        <property name="top_attach">7</property>
       </packing>
     </child>
     <child>
@@ -154,46 +240,9 @@
       </object>
       <packing>
         <property name="left_attach">0</property>
-        <property name="top_attach">6</property>
+        <property name="top_attach">8</property>
         <property name="width">2</property>
       </packing>
-    </child>
-    <child>
-      <object class="GtkLabel" id="eap_peap_domain_label">
-        <property name="visible" bind-source="eap_peap_domain_entry" bind-property="visible" bind-flags="sync-create"/>
-        <property name="can_focus">False</property>
-        <property name="tooltip_text" translatable="yes">Suffix of the server certificate name.</property>
-        <property name="label" translatable="yes">_Domain</property>
-        <property name="use_underline">True</property>
-        <property name="mnemonic_widget">eap_peap_domain_entry</property>
-        <property name="xalign">1</property>
-      </object>
-      <packing>
-        <property name="left_attach">0</property>
-        <property name="top_attach">1</property>
-      </packing>
-    </child>
-    <child>
-      <object class="GtkEntry" id="eap_peap_domain_entry">
-        <property name="visible">True</property>
-        <property name="can_focus">True</property>
-        <property name="hexpand">True</property>
-        <property name="activates_default">True</property>
-        <signal name="changed" handler="nma_ws_changed_cb" object="NMAWs" swapped="no"/>
-      </object>
-      <packing>
-        <property name="left_attach">1</property>
-        <property name="top_attach">1</property>
-      </packing>
-    </child>
-    <child>
-      <placeholder/>
-    </child>
-    <child>
-      <placeholder/>
-    </child>
-    <child>
-      <placeholder/>
     </child>
   </object>
 </interface>

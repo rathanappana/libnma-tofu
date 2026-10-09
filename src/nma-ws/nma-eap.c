@@ -403,6 +403,11 @@ nma_eap_setup_cert_chooser (NMACertChooser *cert_chooser,
 		case NM_SETTING_802_1X_CK_SCHEME_UNKNOWN:
 			/* No CA set. */
 			break;
+		case NM_SETTING_802_1X_CK_SCHEME_SERVER_HASH:
+			/* Not a file - a "hash://server/sha256/<hex>" pin (TOFU or
+			 * manual). Nothing for this generic file chooser to show;
+			 * the PEAP/TTLS widget displays it in its own hash field. */
+			break;
 		default:
 			g_warning ("unhandled certificate scheme %d", scheme);
 		}
